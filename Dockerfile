@@ -18,13 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ---- CloudCLI web UI, installed as the non-root `agent` user ----
 USER agent
-RUN npm install -g @cloudcli-ai/cloudcli \
+RUN npm install -g @cloudcli-ai/cloudcli typescript \
         --fetch-retries=5 \
         --fetch-retry-mintimeout=20000 \
         --fetch-retry-maxtimeout=120000 \
         --fetch-timeout=600000 \
         --no-audit --no-fund \
-    && cloudcli --version
+    && cloudcli --version && tsc --version
 
 # ---- runtime configuration ----
 WORKDIR /home/agent/workspace
