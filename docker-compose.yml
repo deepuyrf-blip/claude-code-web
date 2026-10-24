@@ -32,6 +32,9 @@ services:
       - ./data/cloudcli:/home/agent/.cloudcli
       # installed CloudCLI plugins (persist across rebuilds)
       - ./data/cloudcli-ui:/home/agent/.claude-code-ui
+      # Codex + OpenCode agent configs (written by the /admin page)
+      - ./data/codex:/home/agent/.codex
+      - ./data/opencode:/home/agent/.config/opencode
       # Your projects live here; the agent reads and writes them.
       - "${WORKSPACE_DIR:-./workspace}:/home/agent/workspace"
     expose:
@@ -53,12 +56,17 @@ services:
     environment:
       KEYMGR_DATA_DIR: "/data"
       KEYMGR_PORT: "8000"
+      KEYMGR_CODEX_DIR: "/codex"
+      KEYMGR_OPENCODE_DIR: "/opencode"
       # Optional: set ADMIN_PASSWORD in .env to protect /admin with a password.
       KEYMGR_PASSWORD: "${ADMIN_PASSWORD:-}"
     volumes:
       - ./keymanager/app.py:/app/app.py:ro
       # same host dir that claude-web mounts as ~/.claude
       - ./data/claude:/data
+      # same host dirs claude-web mounts as ~/.codex and ~/.config/opencode
+      - ./data/codex:/codex
+      - ./data/opencode:/opencode
     expose:
       - "8000"
 
