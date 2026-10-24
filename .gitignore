@@ -10,3 +10,7 @@ workspace/
 # os / editor noise
 .DS_Store
 *.swp
+
+# python
+__pycache__/
+*.pyc
