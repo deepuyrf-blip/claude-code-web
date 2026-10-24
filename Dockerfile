@@ -26,7 +26,23 @@ RUN npm install -g @cloudcli-ai/cloudcli typescript \
         --no-audit --no-fund \
     && cloudcli --version && tsc --version
 
+# ---- other coding-agent CLIs CloudCLI can drive (Codex / OpenCode / Cursor) ----
+# Each still needs its own sign-in (Settings -> Agents -> Login, or `codex login`).
+USER agent
+RUN npm install -g @openai/codex opencode-ai \
+        --fetch-retries=5 \
+        --fetch-retry-mintimeout=20000 \
+        --fetch-retry-maxtimeout=120000 \
+        --fetch-timeout=600000 \
+        --no-audit --no-fund \
+    && { command -v codex >/dev/null 2>&1 && echo "codex ok" || echo "codex NOT found"; } \
+    && { command -v opencode >/dev/null 2>&1 && echo "opencode ok" || echo "opencode NOT found"; }
+
+# Cursor CLI installs to ~/.local/bin/cursor-agent (non-fatal if the script fails)
+RUN curl -fsSL https://cursor.com/install | bash || echo "cursor-agent install skipped"
+
 # ---- runtime configuration ----
+ENV PATH=/home/agent/.local/bin:${PATH}
 WORKDIR /home/agent/workspace
 ENV HOST=0.0.0.0 \
     PORT=3001 \
