@@ -1,0 +1,12 @@
+# secrets & generated files
+.env
+.credentials.txt
+caddy/Caddyfile
+
+# runtime data / user projects
+data/
+workspace/
+
+# os / editor noise
+.DS_Store
+*.swp
