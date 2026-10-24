@@ -92,11 +92,16 @@ else
   read -r -p "  Web UI basic-auth username [admin]: " AUSER
   AUSER="${AUSER:-admin}"
   read -r -s -p "  Web UI basic-auth password (khali = auto-generate): " APASS; echo
-  [ -n "$APASS" ] || APASS="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+  [ -n "$APASS" ] || APASS="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+  # Never accept a too-short/empty password.
+  [ "${#APASS}" -ge 8 ] || APASS="ChangeMe-$(date +%s)"
+  ok "Basic-auth password: ${APASS}"
   read -r -p "  HTTP port [80]: " HTTP_PORT; HTTP_PORT="${HTTP_PORT:-80}"
   read -r -p "  HTTPS port [443]: " HTTPS_PORT; HTTPS_PORT="${HTTPS_PORT:-443}"
 
   if [ -n "$DOMAIN" ]; then SITE="$DOMAIN"; else SITE=":80"; fi
+
+  PUBIP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
 
   info "Basic-auth hash bana raha hoon (caddy image se)..."
   AHASH="$(docker run --rm caddy:2 caddy hash-password --plaintext "$APASS" 2>/dev/null | tr -d '\r')"
@@ -124,7 +129,7 @@ EOF
 
   # Credentials for your reference (not committed).
   cat > .credentials.txt <<EOF
-URL      : $([ -n "$DOMAIN" ] && echo "https://${DOMAIN}" || echo "http://<server-ip>:${HTTP_PORT}")
+URL      : $([ -n "$DOMAIN" ] && echo "https://${DOMAIN}" || echo "http://${PUBIP:-<server-ip>}:${HTTP_PORT}")
 Username : ${AUSER}
 Password : ${APASS}
 EOF
