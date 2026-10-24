@@ -69,6 +69,10 @@ else
 fi
 ok "Compose command: $DC"
 
+# Docker daemon needs root (or docker-group membership). Fail loudly here -
+# otherwise a non-root run dies silently a few steps later.
+docker info >/dev/null 2>&1 || die "Docker daemon access nahi hai. Script ko root se chalao:  sudo ./install.sh"
+
 # ---- 2. configuration -----------------------------------------------------
 RESET=0
 for a in "$@"; do [ "$a" = "--reset" ] && RESET=1; done
