@@ -100,6 +100,24 @@ handles the auth detail for you: bearer-token providers go to
 
 Set `ADMIN_PASSWORD` in `.env` to protect the page with a password (blank = open).
 
+## Free option (no credits)
+
+OpenRouter has `:free` models that cost nothing — you only need a free
+OpenRouter account and key (no credit card). On the `/admin` page pick
+**"OpenRouter - FREE models (no credits needed)"** and paste your free key; it
+sets the model to `openrouter/free`, a router that auto-picks a free model
+(with tool support) for each request.
+
+Good free coding models to pin instead, if you prefer a fixed one (they change
+often — check <https://openrouter.ai/models?max_price=0>):
+`cohere/north-mini-code:free`, `qwen/qwen3.8-27b:free`,
+`deepseek/deepseek-v4-flash-0731:free`, `google/gemma-4-31b-it:free`,
+`z-ai/glm-5.2:free`.
+
+Note: free models are rate-limited (~50-200 requests/day) and the free list
+changes over time. For serious daily use, a few dollars of credit on any
+provider goes a long way.
+
 ## Change the web-UI password
 
 ```bash
