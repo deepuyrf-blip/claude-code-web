@@ -150,7 +150,6 @@ def apply_config(provider_id, key, base_url, models, extra_keys=None,
     else:
         settings.pop("modelPicker", None)
     _write_json(SETTINGS_PATH, settings)
-    write_agent_configs(state)
     return state
 
 
