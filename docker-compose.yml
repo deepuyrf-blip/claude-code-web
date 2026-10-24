@@ -41,7 +41,8 @@ services:
   # Browser page (at /admin) to switch provider + API key. Writes Claude Code's
   # settings.json, which new sessions pick up automatically - no restart needed.
   key-manager:
-    image: python:3.12-slim
+    build: ./keymanager
+    image: claude-code-keymgr:local
     container_name: claude-code-keymgr
     restart: unless-stopped
     user: "1000:1000"
