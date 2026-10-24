@@ -8,12 +8,17 @@ an API key. It writes Claude Code's global settings file
 with the matching `env` block, so *new* Claude Code sessions pick the new
 provider up automatically - no container restart needed.
 
+Also has a "Load models" button (queries the provider's /models endpoint and
+fills the tier dropdowns) and a green/red connection indicator.
+
 Stdlib only, so it runs on a plain python:3-slim image.
 """
 import base64
 import html
 import json
 import os
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -26,7 +31,6 @@ SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 STATE_PATH = os.path.join(DATA_DIR, "keymanager.json")
 
 # auth: "token" -> ANTHROPIC_AUTH_TOKEN (bearer), "apikey" -> ANTHROPIC_API_KEY
-# fable/opus/sonnet/haiku are the model each Claude Code tier maps to.
 PROVIDERS = {
     "radoxai": {"label": "Radox AI (radoxai.com)", "base_url": "https://radoxai.com", "auth": "token",
                 "fable": "claude-fable-5.1", "opus": "claude-opus-4.8", "sonnet": "claude-sonnet-5",
@@ -64,6 +68,9 @@ MANAGED_KEYS = [
 ]
 
 
+# --------------------------------------------------------------------------- #
+# settings / state
+# --------------------------------------------------------------------------- #
 def _read_json(path, default):
     try:
         with open(path, encoding="utf-8") as f:
@@ -91,8 +98,6 @@ def load_state():
 
 
 def apply_config(provider_id, key, base_url, models):
-    """Write both the display state and Claude Code's settings.json.
-    `models` is a dict with keys fable/opus/sonnet/haiku."""
     prov = PROVIDERS.get(provider_id, PROVIDERS["custom"])
     state = {"provider": provider_id, "key": key, "base_url": base_url}
     state.update({t: models.get(t, "") for t in TIERS})
@@ -128,6 +133,214 @@ def mask(key):
     return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
 
+# --------------------------------------------------------------------------- #
+# provider probing (models list + connection test)
+# --------------------------------------------------------------------------- #
+def _strip_suffixes(b):
+    for suf in ("/v1", "/anthropic", "/api/anthropic", "/api/coding", "/api"):
+        if b.endswith(suf):
+            return b[: -len(suf)]
+    return b
+
+
+def candidate_model_urls(base_url):
+    b = base_url.rstrip("/")
+    stripped = _strip_suffixes(b)
+    urls = []
+    for root in (b, stripped):
+        for suffix in ("/models", "/v1/models"):
+            u = root + suffix
+            if u not in urls:
+                urls.append(u)
+    return urls
+
+
+def _auth_headers(key):
+    return [
+        {"Authorization": "Bearer " + key, "anthropic-version": "2023-06-01", "accept": "application/json"},
+        {"x-api-key": key, "anthropic-version": "2023-06-01", "accept": "application/json"},
+    ]
+
+
+def _extract_ids(data):
+    items = None
+    if isinstance(data, dict):
+        for k in ("data", "models", "result", "model"):
+            if isinstance(data.get(k), list):
+                items = data[k]
+                break
+    elif isinstance(data, list):
+        items = data
+    if not items:
+        return []
+    out = []
+    for it in items:
+        if isinstance(it, dict):
+            mid = it.get("id") or it.get("name") or it.get("model")
+            if mid:
+                out.append(str(mid))
+        elif isinstance(it, str):
+            out.append(it)
+    return out
+
+
+def fetch_models(base_url, key, timeout=15):
+    tried = []
+    for url in candidate_model_urls(base_url):
+        for headers in _auth_headers(key):
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    raw = r.read().decode("utf-8", "replace")
+                ids = _extract_ids(json.loads(raw))
+            except urllib.error.HTTPError as e:
+                tried.append(f"{url} -> HTTP {e.code}")
+                continue
+            except Exception as e:
+                tried.append(f"{url} -> {type(e).__name__}")
+                continue
+            if ids:
+                return {"ok": True, "url": url, "models": ids, "tried": tried}
+            tried.append(f"{url} -> no models in response")
+    return {"ok": False, "models": [], "tried": tried}
+
+
+def test_connection(base_url, key, model=""):
+    m = fetch_models(base_url, key)
+    if m["ok"]:
+        return {"ok": True, "how": "models endpoint", "detail": f"{len(m['models'])} models found", "tried": m["tried"]}
+
+    # fall back to a 1-token inference call
+    b = base_url.rstrip("/")
+    payload = {"model": (model or "claude-sonnet-5"), "max_tokens": 1,
+               "messages": [{"role": "user", "content": "hi"}]}
+    body = json.dumps(payload).encode()
+    for url in (b + "/v1/messages", b + "/messages"):
+        for headers in _auth_headers(key):
+            h = dict(headers)
+            h["content-type"] = "application/json"
+            req = urllib.request.Request(url, data=body, headers=h, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    r.read()
+                return {"ok": True, "how": "inference", "detail": url, "tried": m["tried"]}
+            except urllib.error.HTTPError as e:
+                m["tried"].append(f"POST {url} -> HTTP {e.code}")
+            except Exception as e:
+                m["tried"].append(f"POST {url} -> {type(e).__name__}")
+    return {"ok": False, "tried": m["tried"]}
+
+
+# --------------------------------------------------------------------------- #
+# page
+# --------------------------------------------------------------------------- #
+HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code - Provider &amp; Key</title>
+<style>
+ body{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1117;color:#e6e8ee}
+ .wrap{max-width:620px;margin:0 auto;padding:24px 16px 48px}
+ h1{font-size:20px;margin:0 0 4px}
+ p.sub{color:#9aa3b2;font-size:13px;margin:0 0 18px}
+ label{display:block;font-size:13px;color:#c3cad6;margin:14px 0 6px}
+ select,input{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:10px;
+   border:1px solid #2a3040;background:#161a24;color:#e6e8ee;font-size:15px}
+ .btn{margin-top:20px;width:100%;padding:13px;border:0;border-radius:10px;
+   background:#3b6ef6;color:#fff;font-size:16px;font-weight:600}
+ .row2{display:flex;gap:10px;margin-top:14px}
+ .row2 button{flex:1;padding:11px;border-radius:10px;border:1px solid #2a3040;
+   background:#161a24;color:#e6e8ee;font-size:14px;font-weight:600}
+ .ok{background:#123524;border:1px solid #1f6f45;color:#8ff0bd;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}
+ .err{background:#3a1620;border:1px solid #8a2b3f;color:#ffb3c1;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}
+ .cur{color:#9aa3b2;font-size:12px;margin-top:4px}
+ .tiers{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+ .status{display:flex;align-items:center;gap:8px;margin-top:16px;font-size:14px}
+ .dot{width:12px;height:12px;border-radius:50%;background:#7a8496;flex:0 0 auto}
+ .dot.green{background:#2ecc71;box-shadow:0 0 8px #2ecc71}
+ .dot.red{background:#e74c3c;box-shadow:0 0 8px #e74c3c}
+ code{background:#161a24;padding:2px 6px;border-radius:6px;font-size:12px}
+ .tried{color:#9aa3b2;font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-all}
+</style></head><body><div class="wrap">
+<h1>Provider &amp; API Key</h1>
+<p class="sub">Pick a provider, paste the key, test the connection, load its models, then Save.</p>
+__BANNER__
+<form method="post" action="__BASE__/save">
+  <label>Provider</label>
+  <select name="provider" id="provider" onchange="fill()">__PROVIDER_OPTS__</select>
+
+  <label>API Key</label>
+  <input name="key" id="key" placeholder="paste the key here" value="__KEY__" autocomplete="off">
+  <div class="cur">current: __KEY_CUR__</div>
+
+  <label>Base URL</label>
+  <input name="base_url" id="base_url" value="__BASE_URL__">
+
+  <div class="row2">
+    <button type="button" onclick="testConn()">Test connection</button>
+    <button type="button" onclick="loadModels()">Load models</button>
+  </div>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Not tested</span></div>
+  <div class="tried" id="tried"></div>
+
+  <label>Models per tier (Fable / Opus / Sonnet / Haiku) - "Load models" fills these dropdowns</label>
+  <div class="tiers">__TIER_INPUTS__</div>
+  <datalist id="modelList"></datalist>
+
+  <button class="btn" type="submit">Save</button>
+</form>
+<p class="sub" style="margin-top:22px">Writes to <code>__SETTINGS_PATH__</code>.
+Bearer providers go to <code>ANTHROPIC_AUTH_TOKEN</code>; official Anthropic uses <code>ANTHROPIC_API_KEY</code> - handled automatically.</p>
+</div>
+<script>
+const BASE = "__BASE__";
+const PROVIDERS = __PROVIDERS_JSON__;
+const TIERS = ["fable","opus","sonnet","haiku"];
+
+function fill(){
+  const p = PROVIDERS[document.getElementById('provider').value] || {};
+  document.getElementById('base_url').value = p.base_url || '';
+  TIERS.forEach(function(t){ document.getElementById(t).value = p[t] || ''; });
+  setStatus(null, 'Not tested'); document.getElementById('tried').textContent = '';
+}
+function setStatus(ok, msg){
+  const dot = document.getElementById('dot');
+  dot.className = 'dot' + (ok === true ? ' green' : ok === false ? ' red' : '');
+  document.getElementById('statusText').textContent = msg;
+}
+async function callApi(path){
+  const base_url = document.getElementById('base_url').value.trim();
+  const key = document.getElementById('key').value.trim();
+  const url = BASE + path + '?base_url=' + encodeURIComponent(base_url) + '&key=' + encodeURIComponent(key);
+  const r = await fetch(url);
+  return await r.json();
+}
+async function testConn(){
+  setStatus(null, 'Testing...'); document.getElementById('tried').textContent = '';
+  try{
+    const d = await callApi('/api/test');
+    if(d.ok){ setStatus(true, 'Connected \\u2713 (' + (d.how || '') + ')'); }
+    else { setStatus(false, 'Connection failed'); document.getElementById('tried').textContent = (d.tried||[]).join('\\n'); }
+  }catch(e){ setStatus(false, 'Error: ' + e); }
+}
+async function loadModels(){
+  setStatus(null, 'Loading models...'); document.getElementById('tried').textContent = '';
+  try{
+    const d = await callApi('/api/models');
+    if(d.ok){
+      const dl = document.getElementById('modelList');
+      dl.innerHTML = '';
+      d.models.forEach(function(m){ const o=document.createElement('option'); o.value=m; dl.appendChild(o); });
+      setStatus(true, 'Connected \\u2713 - ' + d.models.length + ' models loaded');
+      document.getElementById('tried').textContent = 'from ' + d.url;
+    } else {
+      setStatus(false, 'Could not load models');
+      document.getElementById('tried').textContent = (d.tried||[]).join('\\n');
+    }
+  }catch(e){ setStatus(false, 'Error: ' + e); }
+}
+</script></body></html>"""
+
+
 def page(state, saved=False, error=""):
     opts = []
     for pid, p in PROVIDERS.items():
@@ -138,58 +351,21 @@ def page(state, saved=False, error=""):
         banner = '<div class="ok">Saved. New Claude Code sessions will use this provider.</div>'
     if error:
         banner = f'<div class="err">{html.escape(error)}</div>'
-    cur = html.escape(mask(state.get("key", "")))
     tier_inputs = "".join(
-        f'<div><input name="{t}" id="{t}" placeholder="{t}" value="{html.escape(state.get(t, ""))}"></div>'
+        f'<div><input name="{t}" id="{t}" list="modelList" placeholder="{t}" '
+        f'value="{html.escape(state.get(t, ""))}"></div>'
         for t in TIERS
     )
-    return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Code - Provider &amp; Key</title>
-<style>
- body{{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1117;color:#e6e8ee}}
- .wrap{{max-width:600px;margin:0 auto;padding:24px 16px 48px}}
- h1{{font-size:20px;margin:0 0 4px}}
- p.sub{{color:#9aa3b2;font-size:13px;margin:0 0 20px}}
- label{{display:block;font-size:13px;color:#c3cad6;margin:14px 0 6px}}
- select,input{{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:10px;
-   border:1px solid #2a3040;background:#161a24;color:#e6e8ee;font-size:15px}}
- button{{margin-top:22px;width:100%;padding:13px;border:0;border-radius:10px;
-   background:#3b6ef6;color:#fff;font-size:16px;font-weight:600}}
- .ok{{background:#123524;border:1px solid #1f6f45;color:#8ff0bd;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}}
- .err{{background:#3a1620;border:1px solid #8a2b3f;color:#ffb3c1;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}}
- .cur{{color:#9aa3b2;font-size:12px;margin-top:4px}}
- .row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
- code{{background:#161a24;padding:2px 6px;border-radius:6px;font-size:12px}}
-</style></head><body><div class="wrap">
-<h1>Provider &amp; API Key</h1>
-<p class="sub">Pick a provider, paste the key, Save. New Claude Code sessions use it immediately.</p>
-{banner}
-<form method="post" action="{BASE}/save">
-  <label>Provider</label>
-  <select name="provider" id="provider" onchange="fill()">{''.join(opts)}</select>
-  <label>API Key</label>
-  <input name="key" id="key" placeholder="paste the key here" value="{cur}">
-  <div class="cur">current: {cur or '(none saved yet)'}</div>
-  <label>Base URL</label>
-  <input name="base_url" id="base_url" value="{html.escape(state['base_url'])}">
-  <label>Models per tier (Claude Code asks for 4 tiers: Fable / Opus / Sonnet / Haiku)</label>
-  <div class="row">{tier_inputs}</div>
-  <button type="submit">Save</button>
-</form>
-<p class="sub" style="margin-top:22px">Writes to <code>{html.escape(SETTINGS_PATH)}</code>.
-Bearer providers go to <code>ANTHROPIC_AUTH_TOKEN</code>; official Anthropic uses <code>ANTHROPIC_API_KEY</code> - handled automatically.</p>
-</div>
-<script>
-const P = {json.dumps(PROVIDERS)};
-function fill(){{
-  const p = P[document.getElementById('provider').value] || {{}};
-  document.getElementById('base_url').value = p.base_url || '';
-  ['fable','opus','sonnet','haiku'].forEach(function(t){{
-    document.getElementById(t).value = p[t] || '';
-  }});
-}}
-</script></body></html>"""
+    return (HTML
+            .replace("__BANNER__", banner)
+            .replace("__PROVIDER_OPTS__", "".join(opts))
+            .replace("__KEY__", html.escape(state.get("key", "")))
+            .replace("__KEY_CUR__", html.escape(mask(state.get("key", ""))) or "(none saved yet)")
+            .replace("__BASE_URL__", html.escape(state.get("base_url", "")))
+            .replace("__TIER_INPUTS__", tier_inputs)
+            .replace("__SETTINGS_PATH__", html.escape(SETTINGS_PATH))
+            .replace("__PROVIDERS_JSON__", json.dumps(PROVIDERS))
+            .replace("__BASE__", BASE))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -220,19 +396,38 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _json(self, obj):
+        self._send(200, json.dumps(obj), "application/json")
+
     def do_GET(self):
-        path = urlparse(self.path).path.rstrip("/") or "/"
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
         if path == "/":
             self.send_response(302)
             self.send_header("Location", BASE)
             self.end_headers()
             return
+
+        if path in (BASE + "/api/models", BASE + "/api/test"):
+            if not self._authorized():
+                return self._deny()
+            q = parse_qs(parsed.query)
+            base_url = (q.get("base_url", [""])[0] or "").strip()
+            key = (q.get("key", [""])[0] or "").strip()
+            model = (q.get("model", [""])[0] or "").strip()
+            if not base_url:
+                return self._json({"ok": False, "models": [], "tried": ["base_url missing"]})
+            if path.endswith("/test"):
+                return self._json(test_connection(base_url, key, model))
+            return self._json(fetch_models(base_url, key))
+
         if path != BASE:
             self._send(404, "not found")
             return
         if not self._authorized():
             return self._deny()
-        q = parse_qs(urlparse(self.path).query)
+        q = parse_qs(parsed.query)
         self._send(200, page(load_state(), saved="saved" in q))
 
     def do_POST(self):
@@ -251,8 +446,7 @@ class Handler(BaseHTTPRequestHandler):
         if not base_url:
             self._send(200, page(load_state(), error="Base URL khaali hai - provider choose karo ya URL daalo."))
             return
-        models = {t: get(t) for t in TIERS}
-        apply_config(provider, key, base_url, models)
+        apply_config(provider, key, base_url, {t: get(t) for t in TIERS})
         self.send_response(302)
         self.send_header("Location", BASE + "?saved=1")
         self.end_headers()
