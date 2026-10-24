@@ -98,13 +98,17 @@ def load_state():
     st.setdefault("base_url", PROVIDERS.get(st["provider"], PROVIDERS["radoxai"])["base_url"])
     for k in TIERS:
         st.setdefault(k, "")
+    st.setdefault("loaded_models", [])
+    st.setdefault("loaded_provider", "")
     return st
 
 
-def apply_config(provider_id, key, base_url, models):
+def apply_config(provider_id, key, base_url, models, loaded_models=None, loaded_provider=""):
     prov = PROVIDERS.get(provider_id, PROVIDERS["custom"])
     state = {"provider": provider_id, "key": key, "base_url": base_url}
     state.update({t: models.get(t, "") for t in TIERS})
+    state["loaded_models"] = list(loaded_models or [])
+    state["loaded_provider"] = loaded_provider
     _write_json(STATE_PATH, state)
 
     env = {"ANTHROPIC_BASE_URL": base_url,
@@ -125,6 +129,12 @@ def apply_config(provider_id, key, base_url, models):
     for k in MANAGED_KEYS:
         block.pop(k, None)
     block.update(env)
+    # Expand the /model picker with every model we loaded, so the chat's model
+    # dropdown lists all of them (Claude Code's `modelPicker` setting).
+    if loaded_models and loaded_provider == provider_id:
+        settings["modelPicker"] = {"options": [{"model": m} for m in loaded_models]}
+    else:
+        settings.pop("modelPicker", None)
     _write_json(SETTINGS_PATH, settings)
     return state
 
@@ -314,6 +324,7 @@ __BANNER__
   <div class="tried" id="tried"></div>
 
   <label>Models per tier (Fable / Opus / Sonnet / Haiku) - "Load models" fills these dropdowns</label>
+  <p class="sub" style="margin:2px 0 8px">Tip: "Load models" + Save karne se saare models chat ke model picker me bhi aa jayenge (koi bhi model choose kar sakoge).</p>
   <div class="tiers">__TIER_INPUTS__</div>
   <datalist id="modelList"></datalist>
 
@@ -342,8 +353,10 @@ async function callApi(path){
   const base_url = document.getElementById('base_url').value.trim();
   const key = document.getElementById('key').value.trim();
   const model = document.getElementById('opus').value.trim();
+  const provider = document.getElementById('provider').value;
   const url = BASE + path + '?base_url=' + encodeURIComponent(base_url)
-            + '&key=' + encodeURIComponent(key) + '&model=' + encodeURIComponent(model);
+            + '&key=' + encodeURIComponent(key) + '&model=' + encodeURIComponent(model)
+            + '&provider=' + encodeURIComponent(provider);
   const r = await fetch(url);
   return await r.json();
 }
@@ -364,7 +377,7 @@ async function loadModels(){
       dl.innerHTML = '';
       d.models.forEach(function(m){ const o=document.createElement('option'); o.value=m; dl.appendChild(o); });
       setStatus(true, 'Connected \\u2713 - ' + d.models.length + ' models loaded');
-      document.getElementById('tried').textContent = 'from ' + d.url;
+      document.getElementById('tried').textContent = 'from ' + d.url + ' - ab Save karo, saare models chat ke model picker me aa jayenge.';
     } else {
       setStatus(false, 'Could not load models');
       document.getElementById('tried').textContent = (d.tried||[]).join('\\n');
@@ -453,7 +466,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "models": [], "tried": ["base_url missing"]})
             if path.endswith("/test"):
                 return self._json(test_connection(base_url, key, model))
-            return self._json(fetch_models(base_url, key))
+            result = fetch_models(base_url, key)
+            if result["ok"]:
+                st = load_state()
+                st["loaded_models"] = result["models"]
+                st["loaded_provider"] = (q.get("provider", [""])[0] or "").strip()
+                _write_json(STATE_PATH, st)
+            return self._json(result)
 
         if path != BASE:
             self._send(404, "not found")
@@ -479,7 +498,10 @@ class Handler(BaseHTTPRequestHandler):
         if not base_url:
             self._send(200, page(load_state(), error="Base URL khaali hai - provider choose karo ya URL daalo."))
             return
-        apply_config(provider, key, base_url, {t: get(t) for t in TIERS})
+        st = load_state()
+        apply_config(provider, key, base_url, {t: get(t) for t in TIERS},
+                     loaded_models=st.get("loaded_models", []),
+                     loaded_provider=st.get("loaded_provider", ""))
         self.send_response(302)
         self.send_header("Location", BASE + "?saved=1")
         self.end_headers()
