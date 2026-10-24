@@ -24,10 +24,36 @@ die(){  printf '%s\n' "${RED}[x]${RST} $*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "curl chahiye: apt-get update && apt-get install -y curl"
 
 # ---- 1. docker ------------------------------------------------------------
+install_docker() {
+  # (a) Official convenience script - fast path.
+  info "Docker install kar raha hoon (get.docker.com)..."
+  if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sh /tmp/get-docker.sh; then
+    command -v docker >/dev/null 2>&1 && return 0
+  fi
+
+  # (b) Fallback for older distros (e.g. Ubuntu 20.04 'focal') where the
+  #     convenience script fails on "docker-model-plugin" (package not published).
+  #     Install the core set by hand - WITHOUT docker-model-plugin.
+  warn "Convenience script fail hua - manually install kar raha hoon (bina docker-model-plugin)..."
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  local DISTRO="${ID:-ubuntu}"
+  local CODENAME="${VERSION_CODENAME:-$(lsb_release -cs 2>/dev/null || echo stable)}"
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL "https://download.docker.com/linux/${DISTRO}/gpg" -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DISTRO} ${CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -qq
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+    || apt-get install -y docker-ce docker-ce-cli containerd.io
+  systemctl enable --now docker 2>/dev/null || service docker start 2>/dev/null || true
+}
+
 if ! command -v docker >/dev/null 2>&1; then
-  info "Docker nahi mila, install kar raha hoon (get.docker.com)..."
-  curl -fsSL https://get.docker.com | sh
-  ok "Docker install ho gaya."
+  install_docker
+  command -v docker >/dev/null 2>&1 || die "Docker install nahi ho paya. Manually install karo: https://docs.docker.com/engine/install/"
+  ok "Docker install ho gaya: $(docker --version)"
 else
   ok "Docker pehle se installed: $(docker --version)"
 fi
@@ -37,8 +63,8 @@ if docker compose version >/dev/null 2>&1; then
 elif command -v docker-compose >/dev/null 2>&1; then
   DC="docker-compose"
 else
-  info "Compose plugin missing - installing..."
-  curl -fsSL https://get.docker.com | sh
+  info "Compose plugin missing - install kar raha hoon..."
+  apt-get update -qq && apt-get install -y docker-compose-plugin || true
   DC="docker compose"
 fi
 ok "Compose command: $DC"
