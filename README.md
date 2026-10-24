@@ -98,6 +98,12 @@ It writes Claude Code's global settings (`~/.claude/settings.json`), which
 handles the auth detail for you: bearer-token providers go to
 `ANTHROPIC_AUTH_TOKEN`, official Anthropic goes to `ANTHROPIC_API_KEY`.
 
+**Multiple API keys (rotate to share quota):** paste extra keys in the
+"Extra API keys" box (one per line). With 2+ keys, Claude Code is pointed at
+this service's built-in rotating gateway (`/gw`) which round-robins the keys
+per request and retries the next key on 401/402/403/429 — so several keys
+share the load.
+
 Two helpers on the page:
 
 - **Test connection** — a green/red dot. Green means the base URL + key work.
