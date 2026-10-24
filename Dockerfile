@@ -32,8 +32,10 @@ ENV HOST=0.0.0.0 \
     PORT=3001 \
     SERVER_PORT=3001 \
     WORKSPACES_ROOT=/home/agent/workspace \
-    DATABASE_PATH=/home/agent/.cloudcli/auth.db \
-    NODE_ENV=production
+    DATABASE_PATH=/home/agent/.cloudcli/auth.db
+# NOTE: deliberately NOT setting NODE_ENV=production - that makes npm skip
+# devDependencies, which breaks CloudCLI plugin installs (they need typescript
+# and @types/node to build).
 EXPOSE 3001
 
 USER root
