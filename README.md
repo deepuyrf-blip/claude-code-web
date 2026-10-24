@@ -87,6 +87,15 @@ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 
 After changing `.env`, apply it with `./manage.sh restart`.
 
+## Change the web-UI password
+
+```bash
+./set-password.sh
+```
+
+Regenerates `caddy/Caddyfile` with a new hash and reloads Caddy. It also updates
+`.credentials.txt`.
+
 ## Security
 
 - **Basic auth** on every request (Caddy), and **CloudCLI's own password** set on
