@@ -6,6 +6,8 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
 
+docker info >/dev/null 2>&1 || { echo "Docker daemon access nahi hai. Root se chalao:  sudo ./set-password.sh" >&2; exit 1; }
+
 [ -f caddy/Caddyfile.template ] || { echo "caddy/Caddyfile.template nahi mila - sahi folder me chalao." >&2; exit 1; }
 [ -f caddy/Caddyfile ] || { echo "caddy/Caddyfile nahi mila - pehle ./install.sh chalao." >&2; exit 1; }
 
