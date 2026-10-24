@@ -142,7 +142,7 @@ EOF
 fi
 
 # ---- 3. directories (container runs as uid 1000 "agent") ------------------
-mkdir -p data/claude data/cloudcli "$WORKSPACE_DIR"
+mkdir -p data/claude data/cloudcli data/cloudcli-ui "$WORKSPACE_DIR"
 if [ "$(id -u)" -eq 0 ]; then
   chown -R 1000:1000 data "$WORKSPACE_DIR" 2>/dev/null || true
 else
