@@ -99,6 +99,18 @@ After changing `.env`, apply it with `./manage.sh restart`.
 
 ## Troubleshooting
 
+**`E: Unable to locate package docker-model-plugin` while installing Docker** — the
+Docker convenience script ships a package that isn't published for older releases
+(e.g. Ubuntu 20.04 "focal"). `install.sh` now falls back to a manual install
+automatically. To do it by hand:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+    docker-buildx-plugin docker-compose-plugin
+docker --version && docker compose version
+```
+
 **Build runs out of memory (`Killed` / `npm error` during build)** — add swap, then rebuild:
 
 ```bash
