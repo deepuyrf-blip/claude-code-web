@@ -10,8 +10,15 @@ __SITE_ADDRESS__ {
 		__AUTH_USER__ __AUTH_HASH__
 	}
 
+	# Provider / API-key switcher web page.
+	handle /admin* {
+		reverse_proxy key-manager:8000
+	}
+
 	# CloudCLI web UI + WebSockets.
-	reverse_proxy claude-web:3001 {
-		flush_interval -1
+	handle {
+		reverse_proxy claude-web:3001 {
+			flush_interval -1
+		}
 	}
 }
