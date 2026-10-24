@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.credentials.txt
+data/
+workspace/
+caddy/Caddyfile
+README.md
+manage.sh
+install.sh
