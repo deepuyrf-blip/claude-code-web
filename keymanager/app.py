@@ -26,33 +26,41 @@ SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 STATE_PATH = os.path.join(DATA_DIR, "keymanager.json")
 
 # auth: "token" -> ANTHROPIC_AUTH_TOKEN (bearer), "apikey" -> ANTHROPIC_API_KEY
+# fable/opus/sonnet/haiku are the model each Claude Code tier maps to.
 PROVIDERS = {
+    "radoxai": {"label": "Radox AI (radoxai.com)", "base_url": "https://radoxai.com", "auth": "token",
+                "fable": "claude-fable-5.1", "opus": "claude-opus-4.8", "sonnet": "claude-sonnet-5",
+                "haiku": "deepseek-v4-flash-0731"},
     "openrouter_free": {"label": "OpenRouter - FREE models (no credits needed)",
                         "base_url": "https://openrouter.ai/api", "auth": "token",
-                        "opus": "openrouter/free", "sonnet": "openrouter/free", "haiku": "openrouter/free"},
+                        "fable": "openrouter/free", "opus": "openrouter/free",
+                        "sonnet": "openrouter/free", "haiku": "openrouter/free"},
     "openrouter": {"label": "OpenRouter (paid / your credits)",
                    "base_url": "https://openrouter.ai/api", "auth": "token",
-                   "opus": "", "sonnet": "", "haiku": ""},
-    "radoxai": {"label": "Radox AI (radoxai.com)", "base_url": "https://radoxai.com", "auth": "token",
-                "opus": "claude-opus-4.8", "sonnet": "claude-sonnet-5", "haiku": "deepseek-v4-flash-0731"},
+                   "fable": "", "opus": "", "sonnet": "", "haiku": ""},
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/anthropic", "auth": "token",
-                 "opus": "deepseek-v4-pro", "sonnet": "deepseek-v4-pro", "haiku": "deepseek-v4-flash"},
+                 "fable": "deepseek-v4-pro", "opus": "deepseek-v4-pro", "sonnet": "deepseek-v4-pro",
+                 "haiku": "deepseek-v4-flash"},
     "moonshot": {"label": "Kimi / Moonshot", "base_url": "https://api.moonshot.ai/anthropic", "auth": "token",
-                 "opus": "kimi-k2.7-code", "sonnet": "kimi-k2.7-code", "haiku": "kimi-k2.5"},
+                 "fable": "kimi-k2.7-code", "opus": "kimi-k2.7-code", "sonnet": "kimi-k2.7-code",
+                 "haiku": "kimi-k2.5"},
     "zai": {"label": "Z.ai (GLM)", "base_url": "https://api.z.ai/api/anthropic", "auth": "token",
-            "opus": "glm-5.2", "sonnet": "glm-5.2", "haiku": "glm-4.7"},
+            "fable": "glm-5.2", "opus": "glm-5.2", "sonnet": "glm-5.2", "haiku": "glm-4.7"},
     "minimax": {"label": "MiniMax", "base_url": "https://api.minimax.io/anthropic", "auth": "token",
-                "opus": "", "sonnet": "", "haiku": ""},
+                "fable": "", "opus": "", "sonnet": "", "haiku": ""},
     "anthropic": {"label": "Anthropic (official)", "base_url": "https://api.anthropic.com", "auth": "apikey",
-                  "opus": "", "sonnet": "", "haiku": ""},
+                  "fable": "", "opus": "", "sonnet": "", "haiku": ""},
     "custom": {"label": "Custom (Anthropic-compatible)", "base_url": "", "auth": "token",
-               "opus": "", "sonnet": "", "haiku": ""},
+               "fable": "", "opus": "", "sonnet": "", "haiku": ""},
 }
+
+TIERS = ("fable", "opus", "sonnet", "haiku")
 
 MANAGED_KEYS = [
     "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
 ]
 
 
@@ -74,19 +82,20 @@ def _write_json(path, data):
 
 def load_state():
     st = _read_json(STATE_PATH, {})
-    st.setdefault("provider", "openrouter")
+    st.setdefault("provider", "radoxai")
     st.setdefault("key", "")
-    st.setdefault("base_url", PROVIDERS.get(st["provider"], PROVIDERS["openrouter"])["base_url"])
-    for k in ("opus", "sonnet", "haiku"):
+    st.setdefault("base_url", PROVIDERS.get(st["provider"], PROVIDERS["radoxai"])["base_url"])
+    for k in TIERS:
         st.setdefault(k, "")
     return st
 
 
-def apply_config(provider_id, key, base_url, opus, sonnet, haiku):
-    """Write both the display state and Claude Code's settings.json."""
+def apply_config(provider_id, key, base_url, models):
+    """Write both the display state and Claude Code's settings.json.
+    `models` is a dict with keys fable/opus/sonnet/haiku."""
     prov = PROVIDERS.get(provider_id, PROVIDERS["custom"])
-    state = {"provider": provider_id, "key": key, "base_url": base_url,
-             "opus": opus, "sonnet": sonnet, "haiku": haiku}
+    state = {"provider": provider_id, "key": key, "base_url": base_url}
+    state.update({t: models.get(t, "") for t in TIERS})
     _write_json(STATE_PATH, state)
 
     env = {"ANTHROPIC_BASE_URL": base_url,
@@ -97,9 +106,10 @@ def apply_config(provider_id, key, base_url, opus, sonnet, haiku):
     else:
         env["ANTHROPIC_AUTH_TOKEN"] = key
         env["ANTHROPIC_API_KEY"] = ""
-    for tier, val in (("OPUS", opus), ("SONNET", sonnet), ("HAIKU", haiku)):
+    for tier in TIERS:
+        val = (models.get(tier) or "").strip()
         if val:
-            env[f"ANTHROPIC_DEFAULT_{tier}_MODEL"] = val
+            env[f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL"] = val
 
     settings = _read_json(SETTINGS_PATH, {})
     block = settings.setdefault("env", {})
@@ -129,12 +139,16 @@ def page(state, saved=False, error=""):
     if error:
         banner = f'<div class="err">{html.escape(error)}</div>'
     cur = html.escape(mask(state.get("key", "")))
+    tier_inputs = "".join(
+        f'<div><input name="{t}" id="{t}" placeholder="{t}" value="{html.escape(state.get(t, ""))}"></div>'
+        for t in TIERS
+    )
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code - Provider &amp; Key</title>
 <style>
  body{{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1117;color:#e6e8ee}}
- .wrap{{max-width:560px;margin:0 auto;padding:24px 16px 48px}}
+ .wrap{{max-width:600px;margin:0 auto;padding:24px 16px 48px}}
  h1{{font-size:20px;margin:0 0 4px}}
  p.sub{{color:#9aa3b2;font-size:13px;margin:0 0 20px}}
  label{{display:block;font-size:13px;color:#c3cad6;margin:14px 0 6px}}
@@ -145,8 +159,7 @@ def page(state, saved=False, error=""):
  .ok{{background:#123524;border:1px solid #1f6f45;color:#8ff0bd;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}}
  .err{{background:#3a1620;border:1px solid #8a2b3f;color:#ffb3c1;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}}
  .cur{{color:#9aa3b2;font-size:12px;margin-top:4px}}
- .row{{display:flex;gap:10px}}
- .row>div{{flex:1}}
+ .row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
  code{{background:#161a24;padding:2px 6px;border-radius:6px;font-size:12px}}
 </style></head><body><div class="wrap">
 <h1>Provider &amp; API Key</h1>
@@ -160,25 +173,21 @@ def page(state, saved=False, error=""):
   <div class="cur">current: {cur or '(none saved yet)'}</div>
   <label>Base URL</label>
   <input name="base_url" id="base_url" value="{html.escape(state['base_url'])}">
-  <label>Models (optional - leave blank to use defaults)</label>
-  <div class="row">
-    <div><input name="opus" id="opus" placeholder="opus tier" value="{html.escape(state['opus'])}"></div>
-    <div><input name="sonnet" id="sonnet" placeholder="sonnet tier" value="{html.escape(state['sonnet'])}"></div>
-    <div><input name="haiku" id="haiku" placeholder="haiku tier" value="{html.escape(state['haiku'])}"></div>
-  </div>
+  <label>Models per tier (Claude Code asks for 4 tiers: Fable / Opus / Sonnet / Haiku)</label>
+  <div class="row">{tier_inputs}</div>
   <button type="submit">Save</button>
 </form>
 <p class="sub" style="margin-top:22px">Writes to <code>{html.escape(SETTINGS_PATH)}</code>.
-If a provider needs the key in a different field (official Anthropic uses x-api-key), this page handles it automatically.</p>
+Bearer providers go to <code>ANTHROPIC_AUTH_TOKEN</code>; official Anthropic uses <code>ANTHROPIC_API_KEY</code> - handled automatically.</p>
 </div>
 <script>
-const P = {json.dumps({k: v for k, v in PROVIDERS.items()})};
+const P = {json.dumps(PROVIDERS)};
 function fill(){{
   const p = P[document.getElementById('provider').value] || {{}};
   document.getElementById('base_url').value = p.base_url || '';
-  document.getElementById('opus').value = p.opus || '';
-  document.getElementById('sonnet').value = p.sonnet || '';
-  document.getElementById('haiku').value = p.haiku || '';
+  ['fable','opus','sonnet','haiku'].forEach(function(t){{
+    document.getElementById(t).value = p[t] || '';
+  }});
 }}
 </script></body></html>"""
 
@@ -242,7 +251,8 @@ class Handler(BaseHTTPRequestHandler):
         if not base_url:
             self._send(200, page(load_state(), error="Base URL khaali hai - provider choose karo ya URL daalo."))
             return
-        apply_config(provider, key, base_url, get("opus"), get("sonnet"), get("haiku"))
+        models = {t: get(t) for t in TIERS}
+        apply_config(provider, key, base_url, models)
         self.send_response(302)
         self.send_header("Location", BASE + "?saved=1")
         self.end_headers()
