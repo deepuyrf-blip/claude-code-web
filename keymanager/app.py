@@ -27,7 +27,11 @@ STATE_PATH = os.path.join(DATA_DIR, "keymanager.json")
 
 # auth: "token" -> ANTHROPIC_AUTH_TOKEN (bearer), "apikey" -> ANTHROPIC_API_KEY
 PROVIDERS = {
-    "openrouter": {"label": "OpenRouter", "base_url": "https://openrouter.ai/api", "auth": "token",
+    "openrouter_free": {"label": "OpenRouter - FREE models (no credits needed)",
+                        "base_url": "https://openrouter.ai/api", "auth": "token",
+                        "opus": "openrouter/free", "sonnet": "openrouter/free", "haiku": "openrouter/free"},
+    "openrouter": {"label": "OpenRouter (paid / your credits)",
+                   "base_url": "https://openrouter.ai/api", "auth": "token",
                    "opus": "", "sonnet": "", "haiku": ""},
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/anthropic", "auth": "token",
                  "opus": "deepseek-v4-pro", "sonnet": "deepseek-v4-pro", "haiku": "deepseek-v4-flash"},
