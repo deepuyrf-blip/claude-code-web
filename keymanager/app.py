@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Provider / API-key switcher for the Claude Code web UI.
+Provider / API-key switcher + multi-key rotating gateway for the Claude Code web UI.
 
-Serves a small web page (default at /admin) where you pick a provider and paste
-an API key. It writes Claude Code's global settings file
-(~/.claude/settings.json -> mounted here as $KEYMGR_DATA_DIR/settings.json)
-with the matching `env` block, so *new* Claude Code sessions pick the new
-provider up automatically - no container restart needed.
+Page (at /admin): pick a provider, paste one or more API keys, test the
+connection, load the provider's models, Save. Writes Claude Code's global
+settings (~/.claude/settings.json -> $KEYMGR_DATA_DIR/settings.json).
 
-Also has a "Load models" button (queries the provider's /models endpoint and
-fills the tier dropdowns) and a green/red connection indicator.
+Multi-key: if you give more than one key, Claude Code is pointed at this
+service's built-in gateway (/gw) which round-robins the keys across requests and
+retries the next key on 401/402/403/429 - so several keys share the load.
 
 Outbound calls use `curl` when available (some providers sit behind a WAF that
-rejects library user-agents), falling back to urllib. Stdlib only otherwise.
+rejects library user-agents), falling back to urllib.
 """
 import base64
 import html
@@ -20,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +29,8 @@ DATA_DIR = os.environ.get("KEYMGR_DATA_DIR", "/data")
 PORT = int(os.environ.get("KEYMGR_PORT", "8000"))
 PASSWORD = os.environ.get("KEYMGR_PASSWORD", "")  # optional HTTP basic auth
 BASE = "/admin"
+PROXY_PREFIX = "/gw"
+PROXY_URL = os.environ.get("KEYMGR_PROXY_URL", "http://key-manager:8000/gw")
 USER_AGENT = os.environ.get("KEYMGR_USER_AGENT", "curl/8.5.0")
 
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
@@ -96,6 +98,7 @@ def load_state():
     st.setdefault("provider", "radoxai")
     st.setdefault("key", "")
     st.setdefault("base_url", PROVIDERS.get(st["provider"], PROVIDERS["radoxai"])["base_url"])
+    st.setdefault("keys", [])
     for k in TIERS:
         st.setdefault(k, "")
     st.setdefault("loaded_models", [])
@@ -103,22 +106,33 @@ def load_state():
     return st
 
 
-def apply_config(provider_id, key, base_url, models, loaded_models=None, loaded_provider=""):
+def apply_config(provider_id, key, base_url, models, extra_keys=None,
+                 loaded_models=None, loaded_provider=""):
     prov = PROVIDERS.get(provider_id, PROVIDERS["custom"])
-    state = {"provider": provider_id, "key": key, "base_url": base_url}
+    pool = [k.strip() for k in ([key] + list(extra_keys or [])) if k and k.strip()]
+    use_proxy = len(pool) > 1
+
+    state = {"provider": provider_id, "key": key, "base_url": base_url, "keys": pool,
+             "use_proxy": use_proxy}
     state.update({t: models.get(t, "") for t in TIERS})
     state["loaded_models"] = list(loaded_models or [])
     state["loaded_provider"] = loaded_provider
     _write_json(STATE_PATH, state)
 
-    env = {"ANTHROPIC_BASE_URL": base_url,
-           "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"}
-    if prov["auth"] == "apikey":
-        env["ANTHROPIC_API_KEY"] = key
-        env["ANTHROPIC_AUTH_TOKEN"] = ""
-    else:
-        env["ANTHROPIC_AUTH_TOKEN"] = key
+    env = {"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"}
+    if use_proxy:
+        # point Claude Code at our rotating gateway; the gateway injects real keys
+        env["ANTHROPIC_BASE_URL"] = PROXY_URL
+        env["ANTHROPIC_AUTH_TOKEN"] = "multi-key"
         env["ANTHROPIC_API_KEY"] = ""
+    else:
+        env["ANTHROPIC_BASE_URL"] = base_url
+        if prov["auth"] == "apikey":
+            env["ANTHROPIC_API_KEY"] = key
+            env["ANTHROPIC_AUTH_TOKEN"] = ""
+        else:
+            env["ANTHROPIC_AUTH_TOKEN"] = key
+            env["ANTHROPIC_API_KEY"] = ""
     for tier in TIERS:
         val = (models.get(tier) or "").strip()
         if val:
@@ -129,8 +143,6 @@ def apply_config(provider_id, key, base_url, models, loaded_models=None, loaded_
     for k in MANAGED_KEYS:
         block.pop(k, None)
     block.update(env)
-    # Expand the /model picker with every model we loaded, so the chat's model
-    # dropdown lists all of them (Claude Code's `modelPicker` setting).
     if loaded_models and loaded_provider == provider_id:
         settings["modelPicker"] = {"options": [{"model": m} for m in loaded_models]}
     else:
@@ -148,10 +160,9 @@ def mask(key):
 
 
 # --------------------------------------------------------------------------- #
-# HTTP (curl preferred, urllib fallback)
+# HTTP helpers (curl preferred, urllib fallback)
 # --------------------------------------------------------------------------- #
 def _http(url, headers, method="GET", body=None, timeout=20):
-    """Return (status_code, text). status 0 = transport error."""
     if shutil.which("curl"):
         args = ["curl", "-sS", "--max-time", str(timeout), "-X", method,
                 "-A", USER_AGENT, "-w", "\n__HTTP__%{http_code}", url]
@@ -259,7 +270,6 @@ def test_connection(base_url, key, model=""):
     if m["ok"]:
         return {"ok": True, "how": "models endpoint", "detail": f"{len(m['models'])} models found",
                 "tried": m["tried"]}
-
     b = base_url.rstrip("/")
     payload = {"model": (model or "claude-sonnet-5"), "max_tokens": 1,
                "messages": [{"role": "user", "content": "hi"}]}
@@ -270,6 +280,232 @@ def test_connection(base_url, key, model=""):
                 return {"ok": True, "how": "inference", "detail": url, "tried": m["tried"]}
             m["tried"].append(f"POST {url} -> HTTP {code}")
     return {"ok": False, "tried": m["tried"]}
+
+
+# --------------------------------------------------------------------------- #
+# rotating gateway (multi-key)
+# --------------------------------------------------------------------------- #
+_rot_lock = threading.Lock()
+_rot_idx = 0
+
+
+def _next_key(keys):
+    global _rot_idx
+    with _rot_lock:
+        k = keys[_rot_idx % len(keys)]
+        _rot_idx += 1
+    return k
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "keymgr"
+    protocol_version = "HTTP/1.1"
+
+    # ---- auth ----
+    def _authorized(self):
+        if not PASSWORD:
+            return True
+        hdr = self.headers.get("Authorization", "")
+        if not hdr.startswith("Basic "):
+            return False
+        try:
+            user, _, pw = base64.b64decode(hdr[6:]).decode().partition(":")
+        except Exception:
+            return False
+        return pw == PASSWORD or user == PASSWORD
+
+    def _deny(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="key manager"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, obj):
+        self._send(200, json.dumps(obj), "application/json")
+
+    # ---- gateway ----
+    def _proxy(self, method, parsed):
+        sub = parsed.path[len(PROXY_PREFIX):] or "/"
+        if parsed.query:
+            sub += "?" + parsed.query
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        body = self.rfile.read(length) if length else None
+
+        st = load_state()
+        base = (st.get("base_url") or "").rstrip("/")
+        keys = [k for k in (st.get("keys") or []) if k]
+        if not base or not keys:
+            return self._send(502, "gateway: base_url / keys not configured")
+        auth = PROVIDERS.get(st.get("provider", ""), {}).get("auth", "token")
+        url = base + sub
+
+        last = None
+        for i in range(len(keys)):
+            key = _next_key(keys)
+            status, proc, hdrs = self._curl_headers(url, method, key, body, auth)
+            if status is None:
+                self._kill(proc)
+                last = "transport"
+                continue
+            if status in (401, 402, 403, 429) and i < len(keys) - 1:
+                self._kill(proc)
+                last = status
+                continue
+            return self._relay(status, proc, hdrs)
+        return self._send(502, f"gateway: all keys failed (last {last})")
+
+    @staticmethod
+    def _kill(proc):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    def _curl_headers(self, url, method, key, body, auth, timeout=600):
+        args = ["curl", "-sS", "--no-buffer", "--max-time", str(timeout), "-D", "-",
+                "-X", method, url,
+                "-H", ("x-api-key: " + key) if auth == "apikey" else ("Authorization: Bearer " + key),
+                "-H", "anthropic-version: " + (self.headers.get("anthropic-version") or "2023-06-01"),
+                "-H", "content-type: application/json"]
+        acc = self.headers.get("accept")
+        if acc:
+            args += ["-H", "accept: " + acc]
+        stdin = None
+        if body is not None:
+            args += ["--data-binary", "@-"]
+            stdin = subprocess.PIPE
+        proc = subprocess.Popen(args, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if body is not None:
+            try:
+                proc.stdin.write(body)
+                proc.stdin.close()
+            except Exception:
+                pass
+        status, hdrs = None, []
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                s = line.decode("latin-1")
+                if s in ("\r\n", "\n"):
+                    break
+                if s.upper().startswith("HTTP/"):
+                    parts = s.split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        status = int(parts[1])
+                elif ":" in s:
+                    hdrs.append(s.strip())
+        except Exception:
+            pass
+        return status, proc, hdrs
+
+    def _relay(self, status, proc, hdrs):
+        self.send_response(status)
+        for h in hdrs:
+            name, _, val = h.partition(":")
+            if name.strip().lower() in ("transfer-encoding", "content-length", "connection"):
+                continue
+            self.send_header(name.strip(), val.strip())
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception:
+            pass
+        finally:
+            self._kill(proc)
+
+    # ---- routes ----
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == PROXY_PREFIX or path.startswith(PROXY_PREFIX + "/"):
+            return self._proxy("GET", parsed)
+
+        if path == "/":
+            self.send_response(302)
+            self.send_header("Location", BASE)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if path in (BASE + "/api/models", BASE + "/api/test"):
+            if not self._authorized():
+                return self._deny()
+            q = parse_qs(parsed.query)
+            base_url = (q.get("base_url", [""])[0] or "").strip()
+            key = (q.get("key", [""])[0] or "").strip()
+            model = (q.get("model", [""])[0] or "").strip()
+            if not base_url:
+                return self._json({"ok": False, "models": [], "tried": ["base_url missing"]})
+            if path.endswith("/test"):
+                return self._json(test_connection(base_url, key, model))
+            result = fetch_models(base_url, key)
+            if result["ok"]:
+                st = load_state()
+                st["loaded_models"] = result["models"]
+                st["loaded_provider"] = (q.get("provider", [""])[0] or "").strip()
+                _write_json(STATE_PATH, st)
+            return self._json(result)
+
+        if path != BASE:
+            self._send(404, "not found")
+            return
+        if not self._authorized():
+            return self._deny()
+        q = parse_qs(parsed.query)
+        self._send(200, page(load_state(), saved="saved" in q))
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == PROXY_PREFIX or path.startswith(PROXY_PREFIX + "/"):
+            return self._proxy("POST", parsed)
+
+        if path != BASE + "/save":
+            self._send(404, "not found")
+            return
+        if not self._authorized():
+            return self._deny()
+        length = int(self.headers.get("Content-Length", "0"))
+        form = parse_qs(self.rfile.read(length).decode("utf-8"))
+        get = lambda k: (form.get(k, [""])[0] or "").strip()
+        provider = get("provider") or "custom"
+        key = get("key")
+        extra = [ln.strip() for ln in get("extra_keys").splitlines() if ln.strip()]
+        base_url = get("base_url") or PROVIDERS.get(provider, {}).get("base_url", "")
+        if not base_url:
+            self._send(200, page(load_state(), error="Base URL khaali hai - provider choose karo ya URL daalo."))
+            return
+        st = load_state()
+        apply_config(provider, key, base_url, {t: get(t) for t in TIERS},
+                     extra_keys=extra,
+                     loaded_models=st.get("loaded_models", []),
+                     loaded_provider=st.get("loaded_provider", ""))
+        self.send_response(302)
+        self.send_header("Location", BASE + "?saved=1")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -284,8 +520,9 @@ HTML = """<!doctype html><html><head><meta charset="utf-8">
  h1{font-size:20px;margin:0 0 4px}
  p.sub{color:#9aa3b2;font-size:13px;margin:0 0 18px}
  label{display:block;font-size:13px;color:#c3cad6;margin:14px 0 6px}
- select,input{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:10px;
-   border:1px solid #2a3040;background:#161a24;color:#e6e8ee;font-size:15px}
+ select,input,textarea{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:10px;
+   border:1px solid #2a3040;background:#161a24;color:#e6e8ee;font-size:15px;font-family:inherit}
+ textarea{min-height:84px;resize:vertical}
  .btn{margin-top:20px;width:100%;padding:13px;border:0;border-radius:10px;
    background:#3b6ef6;color:#fff;font-size:16px;font-weight:600}
  .row2{display:flex;gap:10px;margin-top:14px}
@@ -303,15 +540,19 @@ HTML = """<!doctype html><html><head><meta charset="utf-8">
  .tried{color:#9aa3b2;font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-all}
 </style></head><body><div class="wrap">
 <h1>Provider &amp; API Key</h1>
-<p class="sub">Pick a provider, paste the key, test the connection, load its models, then Save.</p>
+<p class="sub">Pick a provider, paste key(s), test, load models, Save.</p>
 __BANNER__
 <form method="post" action="__BASE__/save">
   <label>Provider</label>
   <select name="provider" id="provider" onchange="fill()">__PROVIDER_OPTS__</select>
 
-  <label>API Key</label>
+  <label>API Key (primary)</label>
   <input name="key" id="key" placeholder="paste the key here" value="__KEY__" autocomplete="off">
   <div class="cur">current: __KEY_CUR__</div>
+
+  <label>Extra API keys (optional - one per line, for rotation)</label>
+  <textarea name="extra_keys" id="extra_keys" placeholder="key 2&#10;key 3">__EXTRA_KEYS__</textarea>
+  <div class="cur">__KEYS_NOTE__</div>
 
   <label>Base URL</label>
   <input name="base_url" id="base_url" value="__BASE_URL__">
@@ -324,14 +565,14 @@ __BANNER__
   <div class="tried" id="tried"></div>
 
   <label>Models per tier (Fable / Opus / Sonnet / Haiku) - "Load models" fills these dropdowns</label>
-  <p class="sub" style="margin:2px 0 8px">Tip: "Load models" + Save karne se saare models chat ke model picker me bhi aa jayenge (koi bhi model choose kar sakoge).</p>
+  <p class="sub" style="margin:2px 0 8px">Tip: "Load models" + Save se saare models chat ke model picker me bhi aa jayenge.</p>
   <div class="tiers">__TIER_INPUTS__</div>
   <datalist id="modelList"></datalist>
 
   <button class="btn" type="submit">Save</button>
 </form>
 <p class="sub" style="margin-top:22px">Writes to <code>__SETTINGS_PATH__</code>.
-Bearer providers go to <code>ANTHROPIC_AUTH_TOKEN</code>; official Anthropic uses <code>ANTHROPIC_API_KEY</code> - handled automatically.</p>
+2+ keys do to Claude Code apne rotating gateway se chalega (keys baari-baari, quota share).</p>
 </div>
 <script>
 const BASE = "__BASE__";
@@ -402,112 +643,24 @@ def page(state, saved=False, error=""):
         f'value="{html.escape(state.get(t, ""))}"></div>'
         for t in TIERS
     )
+    keys = state.get("keys") or []
+    extra = "\n".join(keys[1:]) if len(keys) > 1 else ""
+    if len(keys) > 1:
+        note = f"{len(keys)} keys - rotating gateway ON (Claude Code -> this service -> provider)"
+    else:
+        note = "1 key - direct mode (add more lines above to rotate)"
     return (HTML
             .replace("__BANNER__", banner)
             .replace("__PROVIDER_OPTS__", "".join(opts))
             .replace("__KEY__", html.escape(state.get("key", "")))
             .replace("__KEY_CUR__", html.escape(mask(state.get("key", ""))) or "(none saved yet)")
+            .replace("__EXTRA_KEYS__", html.escape(extra))
+            .replace("__KEYS_NOTE__", html.escape(note))
             .replace("__BASE_URL__", html.escape(state.get("base_url", "")))
             .replace("__TIER_INPUTS__", tier_inputs)
             .replace("__SETTINGS_PATH__", html.escape(SETTINGS_PATH))
             .replace("__PROVIDERS_JSON__", json.dumps(PROVIDERS))
             .replace("__BASE__", BASE))
-
-
-class Handler(BaseHTTPRequestHandler):
-    server_version = "keymgr"
-
-    def _authorized(self):
-        if not PASSWORD:
-            return True
-        hdr = self.headers.get("Authorization", "")
-        if not hdr.startswith("Basic "):
-            return False
-        try:
-            user, _, pw = base64.b64decode(hdr[6:]).decode().partition(":")
-        except Exception:
-            return False
-        return pw == PASSWORD or user == PASSWORD
-
-    def _deny(self):
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="key manager"')
-        self.end_headers()
-
-    def _send(self, code, body, ctype="text/html; charset=utf-8"):
-        data = body.encode("utf-8") if isinstance(body, str) else body
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _json(self, obj):
-        self._send(200, json.dumps(obj), "application/json")
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
-
-        if path == "/":
-            self.send_response(302)
-            self.send_header("Location", BASE)
-            self.end_headers()
-            return
-
-        if path in (BASE + "/api/models", BASE + "/api/test"):
-            if not self._authorized():
-                return self._deny()
-            q = parse_qs(parsed.query)
-            base_url = (q.get("base_url", [""])[0] or "").strip()
-            key = (q.get("key", [""])[0] or "").strip()
-            model = (q.get("model", [""])[0] or "").strip()
-            if not base_url:
-                return self._json({"ok": False, "models": [], "tried": ["base_url missing"]})
-            if path.endswith("/test"):
-                return self._json(test_connection(base_url, key, model))
-            result = fetch_models(base_url, key)
-            if result["ok"]:
-                st = load_state()
-                st["loaded_models"] = result["models"]
-                st["loaded_provider"] = (q.get("provider", [""])[0] or "").strip()
-                _write_json(STATE_PATH, st)
-            return self._json(result)
-
-        if path != BASE:
-            self._send(404, "not found")
-            return
-        if not self._authorized():
-            return self._deny()
-        q = parse_qs(parsed.query)
-        self._send(200, page(load_state(), saved="saved" in q))
-
-    def do_POST(self):
-        path = urlparse(self.path).path.rstrip("/") or "/"
-        if path != BASE + "/save":
-            self._send(404, "not found")
-            return
-        if not self._authorized():
-            return self._deny()
-        length = int(self.headers.get("Content-Length", "0"))
-        form = parse_qs(self.rfile.read(length).decode("utf-8"))
-        get = lambda k: (form.get(k, [""])[0] or "").strip()
-        provider = get("provider") or "custom"
-        key = get("key")
-        base_url = get("base_url") or PROVIDERS.get(provider, {}).get("base_url", "")
-        if not base_url:
-            self._send(200, page(load_state(), error="Base URL khaali hai - provider choose karo ya URL daalo."))
-            return
-        st = load_state()
-        apply_config(provider, key, base_url, {t: get(t) for t in TIERS},
-                     loaded_models=st.get("loaded_models", []),
-                     loaded_provider=st.get("loaded_provider", ""))
-        self.send_response(302)
-        self.send_header("Location", BASE + "?saved=1")
-        self.end_headers()
-
-    def log_message(self, *args):
-        pass
 
 
 if __name__ == "__main__":
