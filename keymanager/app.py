@@ -33,6 +33,8 @@ PROVIDERS = {
     "openrouter": {"label": "OpenRouter (paid / your credits)",
                    "base_url": "https://openrouter.ai/api", "auth": "token",
                    "opus": "", "sonnet": "", "haiku": ""},
+    "radoxai": {"label": "Radox AI (radoxai.com)", "base_url": "https://radoxai.com/v1", "auth": "token",
+                "opus": "claude-opus-4.8", "sonnet": "claude-opus-4.8", "haiku": "deepseek-v4-flash-0731"},
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/anthropic", "auth": "token",
                  "opus": "deepseek-v4-pro", "sonnet": "deepseek-v4-pro", "haiku": "deepseek-v4-flash"},
     "moonshot": {"label": "Kimi / Moonshot", "base_url": "https://api.moonshot.ai/anthropic", "auth": "token",
