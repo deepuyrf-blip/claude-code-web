@@ -98,6 +98,15 @@ It writes Claude Code's global settings (`~/.claude/settings.json`), which
 handles the auth detail for you: bearer-token providers go to
 `ANTHROPIC_AUTH_TOKEN`, official Anthropic goes to `ANTHROPIC_API_KEY`.
 
+Two helpers on the page:
+
+- **Test connection** — a green/red dot. Green means the base URL + key work.
+- **Load models** — queries the provider's `/models` endpoint and fills the
+tier dropdowns with every model it offers, so you don't have to type IDs.
+
+Pin all four tiers (Fable / Opus / Sonnet / Haiku) — Claude Code asks for all
+of them, and an unpinned tier shows a "model may not exist" error.
+
 Set `ADMIN_PASSWORD` in `.env` to protect the page with a password (blank = open).
 
 ## Free option (no credits)
