@@ -32,6 +32,8 @@ BASE = "/admin"
 PROXY_PREFIX = "/gw"
 PROXY_URL = os.environ.get("KEYMGR_PROXY_URL", "http://key-manager:8000/gw")
 USER_AGENT = os.environ.get("KEYMGR_USER_AGENT", "curl/8.5.0")
+CODEX_DIR = os.environ.get("KEYMGR_CODEX_DIR", "")        # claude-web's ~/.codex
+OPENCODE_DIR = os.environ.get("KEYMGR_OPENCODE_DIR", "")  # claude-web's ~/.config/opencode
 
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 STATE_PATH = os.path.join(DATA_DIR, "keymanager.json")
@@ -148,7 +150,64 @@ def apply_config(provider_id, key, base_url, models, extra_keys=None,
     else:
         settings.pop("modelPicker", None)
     _write_json(SETTINGS_PATH, settings)
+    write_agent_configs(state)
     return state
+
+
+def _openai_base(base_url, use_proxy):
+    if use_proxy:
+        return PROXY_URL.rstrip("/") + "/v1"
+    return base_url.rstrip("/") + "/v1"
+
+
+def write_agent_configs(state):
+    """Best-effort: point Codex and OpenCode at the same provider + key(s).
+    Codex needs the Responses API (may not suit every provider); OpenCode uses
+    the OpenAI chat-completions surface, which radox/freemodel speak."""
+    base = state.get("base_url") or ""
+    if not base:
+        return
+    keys = [k for k in (state.get("keys") or []) if k]
+    token = "multi-key" if state.get("use_proxy") else (keys[0] if keys else "")
+    obase = _openai_base(base, state.get("use_proxy"))
+    models = state.get("loaded_models") or []
+    model = state.get("opus") or state.get("sonnet") or (models[0] if models else "gpt-4o")
+
+    if CODEX_DIR:
+        try:
+            os.makedirs(CODEX_DIR, exist_ok=True)
+            toml = (
+                f'model = "{model}"\n'
+                f'model_provider = "ccw"\n\n'
+                f'[model_providers.ccw]\n'
+                f'name = "claude-code-web"\n'
+                f'base_url = "{obase}"\n'
+                f'wire_api = "chat"\n'
+                f'experimental_bearer_token = "{token}"\n'
+            )
+            with open(os.path.join(CODEX_DIR, "config.toml"), "w", encoding="utf-8") as f:
+                f.write(toml)
+        except Exception:
+            pass
+
+    if OPENCODE_DIR:
+        try:
+            os.makedirs(OPENCODE_DIR, exist_ok=True)
+            cfg = {
+                "$schema": "https://opencode.ai/config.json",
+                "provider": {
+                    "ccw": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "claude-code-web",
+                        "options": {"baseURL": obase, "apiKey": token},
+                        "models": {m: {"name": m} for m in (models or [model])},
+                    }
+                },
+            }
+            with open(os.path.join(OPENCODE_DIR, "opencode.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
 
 
 def mask(key):
