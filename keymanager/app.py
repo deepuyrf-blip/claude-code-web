@@ -11,12 +11,15 @@ provider up automatically - no container restart needed.
 Also has a "Load models" button (queries the provider's /models endpoint and
 fills the tier dropdowns) and a green/red connection indicator.
 
-Stdlib only, so it runs on a plain python:3-slim image.
+Outbound calls use `curl` when available (some providers sit behind a WAF that
+rejects library user-agents), falling back to urllib. Stdlib only otherwise.
 """
 import base64
 import html
 import json
 import os
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +29,7 @@ DATA_DIR = os.environ.get("KEYMGR_DATA_DIR", "/data")
 PORT = int(os.environ.get("KEYMGR_PORT", "8000"))
 PASSWORD = os.environ.get("KEYMGR_PASSWORD", "")  # optional HTTP basic auth
 BASE = "/admin"
+USER_AGENT = os.environ.get("KEYMGR_USER_AGENT", "curl/8.5.0")
 
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 STATE_PATH = os.path.join(DATA_DIR, "keymanager.json")
@@ -134,8 +138,49 @@ def mask(key):
 
 
 # --------------------------------------------------------------------------- #
-# provider probing (models list + connection test)
+# HTTP (curl preferred, urllib fallback)
 # --------------------------------------------------------------------------- #
+def _http(url, headers, method="GET", body=None, timeout=20):
+    """Return (status_code, text). status 0 = transport error."""
+    if shutil.which("curl"):
+        args = ["curl", "-sS", "--max-time", str(timeout), "-X", method,
+                "-A", USER_AGENT, "-w", "\n__HTTP__%{http_code}", url]
+        for k, v in headers.items():
+            args += ["-H", f"{k}: {v}"]
+        if body is not None:
+            args += ["-H", "content-type: application/json", "--data-binary", json.dumps(body)]
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, timeout=timeout + 5)
+        except Exception as e:
+            return 0, f"curl error: {e}"
+        out, code = p.stdout, 0
+        if "__HTTP__" in out:
+            out, _, c = out.rpartition("__HTTP__")
+            c = c.strip()
+            if c.isdigit():
+                code = int(c)
+        return code, out
+
+    data = json.dumps(body).encode() if body is not None else None
+    h = dict(headers)
+    h.setdefault("User-Agent", USER_AGENT)
+    req = urllib.request.Request(url, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:
+        return 0, type(e).__name__
+
+
+def _safe_json(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
 def _strip_suffixes(b):
     for suf in ("/v1", "/anthropic", "/api/anthropic", "/api/coding", "/api"):
         if b.endswith(suf):
@@ -184,50 +229,36 @@ def _extract_ids(data):
     return out
 
 
-def fetch_models(base_url, key, timeout=15):
+def fetch_models(base_url, key, timeout=20):
     tried = []
     for url in candidate_model_urls(base_url):
         for headers in _auth_headers(key):
-            req = urllib.request.Request(url, headers=headers, method="GET")
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    raw = r.read().decode("utf-8", "replace")
-                ids = _extract_ids(json.loads(raw))
-            except urllib.error.HTTPError as e:
-                tried.append(f"{url} -> HTTP {e.code}")
-                continue
-            except Exception as e:
-                tried.append(f"{url} -> {type(e).__name__}")
-                continue
-            if ids:
-                return {"ok": True, "url": url, "models": ids, "tried": tried}
-            tried.append(f"{url} -> no models in response")
+            code, text = _http(url, headers, "GET", timeout=timeout)
+            if 200 <= code < 300:
+                ids = _extract_ids(_safe_json(text))
+                if ids:
+                    return {"ok": True, "url": url, "models": ids, "tried": tried}
+                tried.append(f"{url} -> HTTP {code} (no models in response)")
+            else:
+                tried.append(f"{url} -> HTTP {code}")
     return {"ok": False, "models": [], "tried": tried}
 
 
 def test_connection(base_url, key, model=""):
     m = fetch_models(base_url, key)
     if m["ok"]:
-        return {"ok": True, "how": "models endpoint", "detail": f"{len(m['models'])} models found", "tried": m["tried"]}
+        return {"ok": True, "how": "models endpoint", "detail": f"{len(m['models'])} models found",
+                "tried": m["tried"]}
 
-    # fall back to a 1-token inference call
     b = base_url.rstrip("/")
     payload = {"model": (model or "claude-sonnet-5"), "max_tokens": 1,
                "messages": [{"role": "user", "content": "hi"}]}
-    body = json.dumps(payload).encode()
     for url in (b + "/v1/messages", b + "/messages"):
         for headers in _auth_headers(key):
-            h = dict(headers)
-            h["content-type"] = "application/json"
-            req = urllib.request.Request(url, data=body, headers=h, method="POST")
-            try:
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    r.read()
+            code, _ = _http(url, headers, "POST", payload)
+            if 200 <= code < 300:
                 return {"ok": True, "how": "inference", "detail": url, "tried": m["tried"]}
-            except urllib.error.HTTPError as e:
-                m["tried"].append(f"POST {url} -> HTTP {e.code}")
-            except Exception as e:
-                m["tried"].append(f"POST {url} -> {type(e).__name__}")
+            m["tried"].append(f"POST {url} -> HTTP {code}")
     return {"ok": False, "tried": m["tried"]}
 
 
@@ -310,7 +341,9 @@ function setStatus(ok, msg){
 async function callApi(path){
   const base_url = document.getElementById('base_url').value.trim();
   const key = document.getElementById('key').value.trim();
-  const url = BASE + path + '?base_url=' + encodeURIComponent(base_url) + '&key=' + encodeURIComponent(key);
+  const model = document.getElementById('opus').value.trim();
+  const url = BASE + path + '?base_url=' + encodeURIComponent(base_url)
+            + '&key=' + encodeURIComponent(key) + '&model=' + encodeURIComponent(model);
   const r = await fetch(url);
   return await r.json();
 }
