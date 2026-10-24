@@ -164,6 +164,8 @@ if [ -f .credentials.txt ]; then cat .credentials.txt; else
 echo "  (URL host ${PUBIP:-<server-ip>} ho sakta hai agar domain nahi hai)"
 echo
 echo "  CloudCLI pehli visit par apna password bhi set karne ko kahega."
+ADMIN_BASE=$([ -n "${DOMAIN:-}" ] && echo "https://${DOMAIN}" || echo "http://${PUBIP:-<server-ip>}:${HTTP_PORT}")
+echo "  Provider/key page: ${ADMIN_BASE}/admin"
 echo "  Logs    : $DC logs -f claude-web"
 echo "  Manage  : ./manage.sh [logs|restart|stop|update|status]"
 echo "------------------------------------------------------------"
