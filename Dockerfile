@@ -41,6 +41,12 @@ RUN npm install -g @openai/codex opencode-ai \
 # Cursor CLI installs to ~/.local/bin/cursor-agent (non-fatal if the script fails)
 RUN curl -fsSL https://cursor.com/install | bash || echo "cursor-agent install skipped"
 
+# ---- Graphify: /graphify skill (codebase -> queryable knowledge graph) ----
+# Needs the PyPI package `graphifyy` (double-y); the CLI is `graphify`.
+RUN python3 -m pip install --user --break-system-packages graphifyy 2>/dev/null \
+    || python3 -m pip install --user graphifyy 2>/dev/null \
+    || echo "graphify skipped - install later with: python3 -m pip install --user graphifyy"
+
 # ---- runtime configuration ----
 ENV PATH=/home/agent/.local/bin:${PATH}
 WORKDIR /home/agent/workspace
