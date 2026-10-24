@@ -30,6 +30,8 @@ services:
       # Claude Code config + CloudCLI auth/state (persist across restarts)
       - ./data/claude:/home/agent/.claude
       - ./data/cloudcli:/home/agent/.cloudcli
+      # installed CloudCLI plugins (persist across rebuilds)
+      - ./data/cloudcli-ui:/home/agent/.claude-code-ui
       # Your projects live here; the agent reads and writes them.
       - "${WORKSPACE_DIR:-./workspace}:/home/agent/workspace"
     expose:
