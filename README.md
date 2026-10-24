@@ -87,6 +87,19 @@ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 
 After changing `.env`, apply it with `./manage.sh restart`.
 
+## Switch provider / API key from the browser (`/admin`)
+
+Open **`<your-url>/admin`** — a small page where you pick a provider
+(OpenRouter, DeepSeek, Kimi, Z.ai, MiniMax, Anthropic, or a custom
+Anthropic-compatible endpoint), paste the key and hit Save.
+
+It writes Claude Code's global settings (`~/.claude/settings.json`), which
+**new sessions pick up automatically** — no container restart needed. The page
+handles the auth detail for you: bearer-token providers go to
+`ANTHROPIC_AUTH_TOKEN`, official Anthropic goes to `ANTHROPIC_API_KEY`.
+
+Set `ADMIN_PASSWORD` in `.env` to protect the page with a password (blank = open).
+
 ## Change the web-UI password
 
 ```bash
