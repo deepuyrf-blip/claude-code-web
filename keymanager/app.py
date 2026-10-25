@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -108,8 +109,40 @@ def load_state():
     return st
 
 
+# ---- saved-config history (for 1-click switching when a key runs out) ----
+HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
+
+
+def load_history():
+    h = _read_json(HISTORY_PATH, [])
+    return h if isinstance(h, list) else []
+
+
+def history_add(entry):
+    h = load_history()
+    sig = (entry.get("provider"), entry.get("base_url"), tuple(entry.get("keys", [])))
+    h = [e for e in h if (e.get("provider"), e.get("base_url"), tuple(e.get("keys", []))) != sig]
+    h.insert(0, entry)
+    _write_json(HISTORY_PATH, h[:50])
+
+
+def history_entry(state, provider_id):
+    keys = [k for k in (state.get("keys") or []) if k]
+    first = keys[0] if keys else ""
+    label = f"{PROVIDERS.get(provider_id, {}).get('label', provider_id)} \u00b7 {mask(first) or '(no key)'}"
+    return {
+        "provider": provider_id,
+        "base_url": state.get("base_url", ""),
+        "keys": keys,
+        "models": {t: state.get(t, "") for t in TIERS},
+        "loaded_models": state.get("loaded_models", []),
+        "label": label,
+        "ts": int(time.time()),
+    }
+
+
 def apply_config(provider_id, key, base_url, models, extra_keys=None,
-                 loaded_models=None, loaded_provider=""):
+                 loaded_models=None, loaded_provider="", add_history=True):
     prov = PROVIDERS.get(provider_id, PROVIDERS["custom"])
     pool = [k.strip() for k in ([key] + list(extra_keys or [])) if k and k.strip()]
     use_proxy = len(pool) > 1
@@ -120,6 +153,8 @@ def apply_config(provider_id, key, base_url, models, extra_keys=None,
     state["loaded_models"] = list(loaded_models or [])
     state["loaded_provider"] = loaded_provider
     _write_json(STATE_PATH, state)
+    if add_history:
+        history_add(history_entry(state, provider_id))
 
     env = {"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"}
     if use_proxy:
@@ -537,6 +572,29 @@ class Handler(BaseHTTPRequestHandler):
         if path == PROXY_PREFIX or path.startswith(PROXY_PREFIX + "/"):
             return self._proxy("POST", parsed)
 
+        if path == BASE + "/use":
+            if not self._authorized():
+                return self._deny()
+            length = int(self.headers.get("Content-Length", "0"))
+            form = parse_qs(self.rfile.read(length).decode("utf-8"))
+            try:
+                idx = int((form.get("idx", [""])[0] or "").strip())
+            except Exception:
+                idx = -1
+            h = load_history()
+            if 0 <= idx < len(h):
+                e = h[idx]
+                ks = [k for k in (e.get("keys") or []) if k]
+                apply_config(e.get("provider", "custom"), ks[0] if ks else "",
+                             e.get("base_url", ""), e.get("models", {}),
+                             extra_keys=ks[1:], loaded_models=e.get("loaded_models", []),
+                             loaded_provider=e.get("provider", ""), add_history=False)
+            self.send_response(302)
+            self.send_header("Location", BASE + "?saved=1")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         if path != BASE + "/save":
             self._send(404, "not found")
             return
@@ -596,6 +654,9 @@ HTML = """<!doctype html><html><head><meta charset="utf-8">
  .dot.red{background:#e74c3c;box-shadow:0 0 8px #e74c3c}
  code{background:#161a24;padding:2px 6px;border-radius:6px;font-size:12px}
  .tried{color:#9aa3b2;font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-all}
+ .hrow{display:flex;align-items:center;gap:8px;margin:6px 0}
+ .hlab{flex:1;font-size:13px;color:#c3cad6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .hbtn{padding:8px 16px;border-radius:8px;border:0;background:#2ecc71;color:#04301c;font-weight:700}
 </style></head><body><div class="wrap">
 <h1>Provider &amp; API Key</h1>
 <p class="sub">Pick a provider, paste key(s), test, load models, Save.</p>
@@ -629,6 +690,7 @@ __BANNER__
 
   <button class="btn" type="submit">Save</button>
 </form>
+__HISTORY__
 <p class="sub" style="margin-top:22px">Writes to <code>__SETTINGS_PATH__</code>.
 2+ keys do to Claude Code apne rotating gateway se chalega (keys baari-baari, quota share).</p>
 </div>
@@ -707,7 +769,22 @@ def page(state, saved=False, error=""):
         note = f"{len(keys)} keys - rotating gateway ON (Claude Code -> this service -> provider)"
     else:
         note = "1 key - direct mode (add more lines above to rotate)"
+    hist = load_history()
+    if hist:
+        rows = []
+        for i, e in enumerate(hist):
+            rows.append(
+                f'<form method="post" action="{BASE}/use" class="hrow">'
+                f'<input type="hidden" name="idx" value="{i}">'
+                f'<span class="hlab">{html.escape(e.get("label", ""))}</span>'
+                f'<button type="submit" class="hbtn">Use</button></form>'
+            )
+        history_html = ('<label>Saved configs - 1-click switch (jab ek key ka limit khatam ho)</label>'
+                        + "".join(rows))
+    else:
+        history_html = ""
     return (HTML
+            .replace("__HISTORY__", history_html)
             .replace("__BANNER__", banner)
             .replace("__PROVIDER_OPTS__", "".join(opts))
             .replace("__KEY__", html.escape(state.get("key", "")))
