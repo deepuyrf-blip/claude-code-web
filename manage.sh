@@ -12,6 +12,7 @@ case "${1:-help}" in
   start)   $DC up -d ;;
   status)  $DC ps ;;
   update)  git pull --ff-only && $DC up -d --build ;;
+  upgrade) $DC build --no-cache claude-web && $DC up -d ;;   # latest Claude Code + all CLIs
   url)     [ -f .credentials.txt ] && head -n1 .credentials.txt || echo "no .credentials.txt (run ./install.sh)";;
   *)
     cat <<'EOF'
@@ -22,6 +23,7 @@ Usage: ./manage.sh <command>
   restart   Restart containers
   stop      Stop and remove containers
   update    git pull + rebuild
+  upgrade   Rebuild claude-web with --no-cache (latest Claude Code + CLIs)
   url       Print the configured URL
 EOF
     ;;
