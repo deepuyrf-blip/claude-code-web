@@ -33,6 +33,8 @@ Caddy reverse proxy (automatic HTTPS + password protection).
 - An **OpenRouter API key** — create one at <https://openrouter.ai/keys> (starts with `sk-or-`).
 - Optional: a **domain** pointing at the server's IP, for real HTTPS.
 
+📖 **Full setup & usage guide → [INSTALL.md](INSTALL.md)**
+
 ## One-command install (fresh VPS)
 
 On a brand-new server, as root — this installs everything and prints your
