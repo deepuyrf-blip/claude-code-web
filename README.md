@@ -33,6 +33,18 @@ Caddy reverse proxy (automatic HTTPS + password protection).
 - An **OpenRouter API key** — create one at <https://openrouter.ai/keys> (starts with `sk-or-`).
 - Optional: a **domain** pointing at the server's IP, for real HTTPS.
 
+## One-command install (fresh VPS)
+
+On a brand-new server, as root — this installs everything and prints your
+Cloudflare tunnel URL:
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/deepuyrf-blip/claude-code-web/main/quickstart.sh)"
+```
+
+It installs Docker + the stack, starts a `cloudflared` quick tunnel, and prints
+the URL to open. (The tunnel URL changes if the VPS reboots.)
+
 ## Quick start
 
 ```bash
